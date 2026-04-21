@@ -131,7 +131,10 @@ install_miniforge_python() {
   else
     log "Normalizing Miniforge runtime to Python 3.11..."
   fi
-  "$MINIFORGE_DIR/bin/conda" install -y python=3.11 pip setuptools
+  if ! "$MINIFORGE_DIR/bin/conda" install -y python=3.11 pip setuptools; then
+    log "Python 3.11 package not available on current channel snapshot. Falling back to Python 3.12..."
+    "$MINIFORGE_DIR/bin/conda" install -y python=3.12 pip setuptools
+  fi
   PYTHON_BIN="$MINIFORGE_DIR/bin/python"
 }
 
