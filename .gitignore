@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+Backend/sql_app.db
+gunicorn.pid
+Backend/runtime/
