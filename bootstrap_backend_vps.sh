@@ -105,15 +105,11 @@ ensure_python_runtime() {
 python_version_supported() {
   "$PYTHON_BIN" - <<'PY'
 import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)
 PY
 }
 
 install_miniforge_python() {
-  if [ -x "$MINIFORGE_DIR/bin/python" ]; then
-    PYTHON_BIN="$MINIFORGE_DIR/bin/python"
-    return 0
-  fi
   local arch
   arch="$(uname -m)"
   case "$arch" in
@@ -127,10 +123,15 @@ install_miniforge_python() {
   local installer="Miniforge3-Linux-${arch}.sh"
   local installer_path="/tmp/${installer}"
   local installer_url="https://github.com/conda-forge/miniforge/releases/latest/download/${installer}"
-  log "System Python is too old. Installing Miniforge Python 3.11..."
-  download_file "$installer_url" "$installer_path"
-  bash "$installer_path" -b -p "$MINIFORGE_DIR"
-  rm -f "$installer_path"
+  if [ ! -x "$MINIFORGE_DIR/bin/conda" ]; then
+    log "System Python is too old. Installing Miniforge Python 3.11..."
+    download_file "$installer_url" "$installer_path"
+    bash "$installer_path" -b -p "$MINIFORGE_DIR"
+    rm -f "$installer_path"
+  else
+    log "Normalizing Miniforge runtime to Python 3.11..."
+  fi
+  "$MINIFORGE_DIR/bin/conda" install -y python=3.11 pip setuptools
   PYTHON_BIN="$MINIFORGE_DIR/bin/python"
 }
 
