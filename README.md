@@ -15,7 +15,7 @@ bash bootstrap_backend_vps.sh
 ```
 
 Script se:
-- tu cai Python/venv neu VPS la Ubuntu/Debian va dang thieu
+- tu cai Python/venv neu VPS la Ubuntu/Debian hoac CentOS/RHEL va dang thieu
 - tao `.venv`
 - cai `Backend/requirements.txt`
 - tao `.env` neu chua co

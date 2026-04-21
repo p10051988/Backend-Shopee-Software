@@ -37,26 +37,70 @@ apt_install() {
   run_as_root apt-get install -y "$@"
 }
 
-if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+yum_install() {
+  if ! command -v yum >/dev/null 2>&1; then
+    return 1
+  fi
+  run_as_root yum install -y "$@"
+}
+
+detect_python_bin() {
+  for candidate in "$PYTHON_BIN" python3 python36; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      PYTHON_BIN="$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+ensure_python_runtime() {
+  if detect_python_bin; then
+    return 0
+  fi
   if command -v apt-get >/dev/null 2>&1; then
     apt_install python3 python3-venv python3-pip
     PYTHON_BIN="python3"
-  else
-    log "Python not found: $PYTHON_BIN"
-    exit 1
+    return 0
   fi
-fi
+  if command -v yum >/dev/null 2>&1; then
+    yum_install python3 python3-pip || yum_install python36 python36-pip
+    detect_python_bin && return 0
+  fi
+  log "Python runtime not found and could not be installed automatically."
+  exit 1
+}
+
+ensure_virtualenv() {
+  if "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
+    return 0
+  fi
+  "$PYTHON_BIN" -m pip install virtualenv
+  return 0
+}
+
+ensure_python_runtime
 
 if [ ! -d "$VENV_DIR" ]; then
   if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
     if command -v apt-get >/dev/null 2>&1; then
       apt_install python3-venv python3-pip
-      "$PYTHON_BIN" -m venv "$VENV_DIR"
-    else
-      log "python -m venv failed. Install venv support first."
-      exit 1
+      "$PYTHON_BIN" -m venv "$VENV_DIR" && :
     fi
   fi
+  if [ ! -d "$VENV_DIR" ]; then
+    ensure_virtualenv
+    "$PYTHON_BIN" -m virtualenv "$VENV_DIR"
+  fi
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+  log "Failed to create virtual environment."
+  exit 1
+fi
+
+if command -v python3 >/dev/null 2>&1 && [ "$PYTHON_BIN" = "python36" ] && [ ! -e /usr/local/bin/python3 ]; then
+  ln -sf "$(command -v python36)" /usr/local/bin/python3 2>/dev/null || true
 fi
 
 # shellcheck disable=SC1091
