@@ -3,10 +3,11 @@ uvicorn==0.16.0
 gunicorn==21.2.0
 sqlalchemy==1.4.54
 greenlet==3.1.1
-pydantic==1.9.2
+pydantic==1.10.15
 python-multipart==0.0.5
 passlib[bcrypt]==1.7.4
 pyjwt==2.4.0
 cryptography==40.0.2
 psutil==7.2.2
 psycopg2-binary==2.9.10
+anyio==3.7.1
