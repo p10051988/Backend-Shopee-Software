@@ -16,6 +16,7 @@ bash bootstrap_backend_vps.sh
 
 Script se:
 - tu cai Python/venv neu VPS la Ubuntu/Debian hoac CentOS/RHEL va dang thieu
+- neu Python he thong qua cu (vd 3.6), tu cai Miniforge Python 3.11 trong home
 - tao `.venv`
 - cai `Backend/requirements.txt`
 - tao `.env` neu chua co

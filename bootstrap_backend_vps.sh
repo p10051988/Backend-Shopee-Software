@@ -11,6 +11,7 @@ DATABASE_MODE="${DATABASE_MODE:-sqlite}"
 POSTGRES_DB="${POSTGRES_DB:-autoshopee}"
 POSTGRES_USER="${POSTGRES_USER:-autoshopee}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
+MINIFORGE_DIR="${MINIFORGE_DIR:-$SCRIPT_DIR/.miniforge3}"
 
 log() {
   echo "[BOOTSTRAP] $*"
@@ -54,6 +55,36 @@ detect_python_bin() {
   return 1
 }
 
+require_download_tool() {
+  if command -v curl >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install curl
+    return 0
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    yum_install curl || yum_install wget
+    return 0
+  fi
+  log "Need curl or wget to download Miniforge."
+  exit 1
+}
+
+download_file() {
+  local url="$1"
+  local dest="$2"
+  require_download_tool
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$dest"
+    return 0
+  fi
+  wget -O "$dest" "$url"
+}
+
 ensure_python_runtime() {
   if detect_python_bin; then
     return 0
@@ -71,6 +102,50 @@ ensure_python_runtime() {
   exit 1
 }
 
+python_version_supported() {
+  "$PYTHON_BIN" - <<'PY'
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+}
+
+install_miniforge_python() {
+  if [ -x "$MINIFORGE_DIR/bin/python" ]; then
+    PYTHON_BIN="$MINIFORGE_DIR/bin/python"
+    return 0
+  fi
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *)
+      log "Unsupported architecture for Miniforge: $arch"
+      exit 1
+      ;;
+  esac
+  local installer="Miniforge3-Linux-${arch}.sh"
+  local installer_path="/tmp/${installer}"
+  local installer_url="https://github.com/conda-forge/miniforge/releases/latest/download/${installer}"
+  log "System Python is too old. Installing Miniforge Python 3.11..."
+  download_file "$installer_url" "$installer_path"
+  bash "$installer_path" -b -p "$MINIFORGE_DIR"
+  rm -f "$installer_path"
+  PYTHON_BIN="$MINIFORGE_DIR/bin/python"
+}
+
+ensure_modern_python() {
+  ensure_python_runtime
+  if python_version_supported; then
+    return 0
+  fi
+  install_miniforge_python
+  if ! python_version_supported; then
+    log "Failed to provision a supported Python runtime."
+    exit 1
+  fi
+}
+
 ensure_virtualenv() {
   if "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
     return 0
@@ -79,7 +154,7 @@ ensure_virtualenv() {
   return 0
 }
 
-ensure_python_runtime
+ensure_modern_python
 
 if [ ! -d "$VENV_DIR" ]; then
   if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
@@ -97,10 +172,6 @@ fi
 if [ ! -d "$VENV_DIR" ]; then
   log "Failed to create virtual environment."
   exit 1
-fi
-
-if command -v python3 >/dev/null 2>&1 && [ "$PYTHON_BIN" = "python36" ] && [ ! -e /usr/local/bin/python3 ]; then
-  ln -sf "$(command -v python36)" /usr/local/bin/python3 2>/dev/null || true
 fi
 
 # shellcheck disable=SC1091
