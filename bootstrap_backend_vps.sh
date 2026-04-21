@@ -12,6 +12,7 @@ POSTGRES_DB="${POSTGRES_DB:-autoshopee}"
 POSTGRES_USER="${POSTGRES_USER:-autoshopee}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 MINIFORGE_DIR="${MINIFORGE_DIR:-$SCRIPT_DIR/.miniforge3}"
+MINIFORGE_RELEASE="${MINIFORGE_RELEASE:-25.11.0-1}"
 
 log() {
   echo "[BOOTSTRAP] $*"
@@ -122,18 +123,12 @@ install_miniforge_python() {
   esac
   local installer="Miniforge3-Linux-${arch}.sh"
   local installer_path="/tmp/${installer}"
-  local installer_url="https://github.com/conda-forge/miniforge/releases/latest/download/${installer}"
+  local installer_url="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_RELEASE}/${installer}"
   if [ ! -x "$MINIFORGE_DIR/bin/conda" ]; then
-    log "System Python is too old. Installing Miniforge Python 3.11..."
+    log "System Python is too old. Installing Miniforge ${MINIFORGE_RELEASE}..."
     download_file "$installer_url" "$installer_path"
     bash "$installer_path" -b -p "$MINIFORGE_DIR"
     rm -f "$installer_path"
-  else
-    log "Normalizing Miniforge runtime to Python 3.11..."
-  fi
-  if ! "$MINIFORGE_DIR/bin/conda" install -y python=3.11 pip setuptools; then
-    log "Python 3.11 package not available on current channel snapshot. Falling back to Python 3.12..."
-    "$MINIFORGE_DIR/bin/conda" install -y python=3.12 pip setuptools
   fi
   PYTHON_BIN="$MINIFORGE_DIR/bin/python"
 }
