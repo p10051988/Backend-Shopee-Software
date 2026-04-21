@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+PORT="${PORT:-8000}"
+VENV_DIR="${VENV_DIR:-.venv}"
+DATABASE_MODE="${DATABASE_MODE:-sqlite}"
+POSTGRES_DB="${POSTGRES_DB:-autoshopee}"
+POSTGRES_USER="${POSTGRES_USER:-autoshopee}"
+POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
+
+log() {
+  echo "[BOOTSTRAP] $*"
+}
+
+run_as_root() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
+    return
+  fi
+  log "Need root/sudo to run: $*"
+  return 1
+}
+
+apt_install() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    return 1
+  fi
+  run_as_root apt-get update -y
+  run_as_root apt-get install -y "$@"
+}
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install python3 python3-venv python3-pip
+    PYTHON_BIN="python3"
+  else
+    log "Python not found: $PYTHON_BIN"
+    exit 1
+  fi
+fi
+
+if [ ! -d "$VENV_DIR" ]; then
+  if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
+    if command -v apt-get >/dev/null 2>&1; then
+      apt_install python3-venv python3-pip
+      "$PYTHON_BIN" -m venv "$VENV_DIR"
+    else
+      log "python -m venv failed. Install venv support first."
+      exit 1
+    fi
+  fi
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+
+python -m pip install --upgrade pip
+python -m pip install -r Backend/requirements.txt
+
+generate_hex_secret() {
+  "$PYTHON_BIN" - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+}
+
+ensure_safe_identifier() {
+  local value="$1"
+  local label="$2"
+  if [[ ! "$value" =~ ^[A-Za-z0-9_]+$ ]]; then
+    log "$label chi duoc gom chu, so va dau _"
+    exit 1
+  fi
+}
+
+run_psql_admin() {
+  local sql="$1"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo -u postgres psql -v ON_ERROR_STOP=1 -tAc "$sql"
+    return
+  fi
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 -tAc "$sql"
+    return
+  fi
+  log "Need root/sudo to configure PostgreSQL"
+  exit 1
+}
+
+prepare_database_url() {
+  if [ -n "${DATABASE_URL:-}" ]; then
+    return
+  fi
+  if [ "$DATABASE_MODE" = "postgres" ]; then
+    ensure_safe_identifier "$POSTGRES_DB" "POSTGRES_DB"
+    ensure_safe_identifier "$POSTGRES_USER" "POSTGRES_USER"
+    if ! command -v psql >/dev/null 2>&1; then
+      if command -v apt-get >/dev/null 2>&1; then
+        apt_install postgresql postgresql-contrib
+      else
+        log "PostgreSQL client/server missing. Install it or set DATABASE_URL manually."
+        exit 1
+      fi
+    fi
+    run_as_root systemctl enable postgresql >/dev/null 2>&1 || true
+    run_as_root systemctl start postgresql >/dev/null 2>&1 || true
+    if [ -z "$POSTGRES_PASSWORD" ]; then
+      POSTGRES_PASSWORD="$(generate_hex_secret)"
+    fi
+    ROLE_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" || true)"
+    if [ -z "$ROLE_EXISTS" ]; then
+      run_psql_admin "CREATE ROLE ${POSTGRES_USER} LOGIN PASSWORD '${POSTGRES_PASSWORD}'"
+    fi
+    DB_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" || true)"
+    if [ -z "$DB_EXISTS" ]; then
+      run_psql_admin "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER}"
+    fi
+    DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
+    export DATABASE_URL
+    log "Using PostgreSQL database: ${POSTGRES_DB}"
+    return
+  fi
+  DATABASE_URL="sqlite:///$SCRIPT_DIR/Backend/sql_app.db"
+  export DATABASE_URL
+  log "Using SQLite database for quickstart"
+}
+
+prepare_database_url
+
+if [ ! -f ".env" ]; then
+  GENERATED_MASTER_KEY="$(python - <<'PY'
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode())
+PY
+)"
+  GENERATED_INTERNAL_SECRET="$(python - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+)"
+  cat > .env <<EOF
+BACKEND_URL=${BACKEND_PUBLIC_URL:-http://127.0.0.1:${PORT}}
+BACKEND_BIND=0.0.0.0:${PORT}
+BACKEND_WORKERS=2
+CUSTOMER_PORTAL_URL=${CUSTOMER_PORTAL_URL:-}
+DATABASE_URL=${DATABASE_URL}
+INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-$GENERATED_INTERNAL_SECRET}
+MASTER_KEY=${MASTER_KEY:-$GENERATED_MASTER_KEY}
+RELEASE_SIGNING_PRIVATE_KEY=${RELEASE_SIGNING_PRIVATE_KEY:-}
+GUNICORN_PID_FILE=${GUNICORN_PID_FILE:-gunicorn.pid}
+WORKER_METRICS_DIR=${WORKER_METRICS_DIR:-Backend/runtime/worker_metrics}
+WORKER_METRICS_ENABLED=${WORKER_METRICS_ENABLED:-true}
+WORKER_METRICS_FLUSH_SECONDS=${WORKER_METRICS_FLUSH_SECONDS:-2}
+DEV_MODE=false
+ALLOW_INSECURE_DEFAULTS=false
+EOF
+  log "Created .env with generated defaults."
+fi
+
+if [ -n "${BACKEND_PUBLIC_URL:-}" ]; then
+  export BACKEND_URL="$BACKEND_PUBLIC_URL"
+fi
+export BACKEND_BIND="${BACKEND_BIND:-0.0.0.0:$PORT}"
+exec gunicorn -c gunicorn.conf.py Backend.main:app
