@@ -185,6 +185,64 @@ init_postgres_if_needed() {
   fi
 }
 
+try_start_postgres_service() {
+  local service_name="$1"
+  if [ -z "$service_name" ]; then
+    return 1
+  fi
+  if command -v systemctl >/dev/null 2>&1; then
+    run_as_root systemctl enable "$service_name" >/dev/null 2>&1 || true
+    run_as_root systemctl start "$service_name" >/dev/null 2>&1 || true
+    run_as_root systemctl start "${service_name}.service" >/dev/null 2>&1 || true
+  fi
+  if command -v service >/dev/null 2>&1; then
+    run_as_root service "$service_name" start >/dev/null 2>&1 || true
+  fi
+}
+
+wait_for_postgres_ready() {
+  local attempts="${1:-20}"
+  local i
+  for ((i=1; i<=attempts; i++)); do
+    if command -v pg_isready >/dev/null 2>&1; then
+      if pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then
+        return 0
+      fi
+    elif command -v psql >/dev/null 2>&1; then
+      if PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+        return 0
+      fi
+    elif command -v bash >/dev/null 2>&1; then
+      if bash -lc "</dev/tcp/127.0.0.1/5432" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+ensure_postgres_running() {
+  try_start_postgres_service "postgresql"
+  try_start_postgres_service "postgresql-16"
+  try_start_postgres_service "postgresql-15"
+  try_start_postgres_service "postgresql-14"
+  try_start_postgres_service "postgresql-13"
+  try_start_postgres_service "postgresql-12"
+  try_start_postgres_service "postgresql-11"
+  try_start_postgres_service "postgresql-10"
+  try_start_postgres_service "postgresql-9.6"
+  try_start_postgres_service "postgresql-9.5"
+  try_start_postgres_service "postgresql-9.4"
+  try_start_postgres_service "postgresql-9.3"
+  try_start_postgres_service "postgresql-9.2"
+
+  if ! wait_for_postgres_ready 25; then
+    log "PostgreSQL service did not become ready on 127.0.0.1:5432"
+    return 1
+  fi
+}
+
 prepare_database_url() {
   if [ -n "${DATABASE_URL:-}" ]; then
     export DATABASE_URL
@@ -203,12 +261,12 @@ prepare_database_url() {
   ensure_safe_identifier "$POSTGRES_USER" "POSTGRES_USER"
   ensure_postgres_runtime
   init_postgres_if_needed
-  run_as_root systemctl enable postgresql >/dev/null 2>&1 || true
-  run_as_root systemctl start postgresql >/dev/null 2>&1 || true
 
   if [ -z "$POSTGRES_PASSWORD" ]; then
     POSTGRES_PASSWORD="$(generate_hex_secret)"
   fi
+
+  ensure_postgres_running
 
   ROLE_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" || true)"
   if [ -z "$ROLE_EXISTS" ]; then
