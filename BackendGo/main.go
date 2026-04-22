@@ -426,7 +426,7 @@ func newApp(cfg Config, db *gorm.DB) *App {
 func loadConfig() Config {
 	return Config{
 		BindAddress:           getenv("BACKEND_BIND", "0.0.0.0:8000"),
-		DatabaseURL:           getenv("DATABASE_URL", "postgresql://autoshopee:autoshopee@127.0.0.1:5432/autoshopee?sslmode=disable"),
+		DatabaseURL:           getenv("DATABASE_URL", "postgresql://autoshopee:autoshopee@localhost:5432/autoshopee?sslmode=disable"),
 		MasterKey:             getenv("MASTER_KEY", ""),
 		InternalAPISecret:     getenv("INTERNAL_API_SECRET", ""),
 		ReleasePublicKeyB64:   getenv("RELEASE_PUBLIC_KEY_B64", publicKeyB64),

@@ -12,6 +12,7 @@ DATABASE_MODE="${DATABASE_MODE:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-autoshopee}"
 POSTGRES_USER="${POSTGRES_USER:-autoshopee}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
+POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 MINIFORGE_DIR="${MINIFORGE_DIR:-$SCRIPT_DIR/.miniforge3}"
 MINIFORGE_RELEASE="${MINIFORGE_RELEASE:-25.11.0-1}"
 BACKEND_BIN="${BACKEND_BIN:-$SCRIPT_DIR/bin/backendgo}"
@@ -205,15 +206,11 @@ wait_for_postgres_ready() {
   local i
   for ((i=1; i<=attempts; i++)); do
     if command -v pg_isready >/dev/null 2>&1; then
-      if pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1; then
+      if pg_isready -h "$POSTGRES_HOST" -p 5432 >/dev/null 2>&1; then
         return 0
       fi
     elif command -v psql >/dev/null 2>&1; then
-      if PGPASSWORD="$POSTGRES_PASSWORD" psql -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
-        return 0
-      fi
-    elif command -v bash >/dev/null 2>&1; then
-      if bash -lc "</dev/tcp/127.0.0.1/5432" >/dev/null 2>&1; then
+      if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$POSTGRES_HOST" -p 5432 -U "$POSTGRES_USER" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
         return 0
       fi
     fi
@@ -238,7 +235,7 @@ ensure_postgres_running() {
   try_start_postgres_service "postgresql-9.2"
 
   if ! wait_for_postgres_ready 25; then
-    log "PostgreSQL service did not become ready on 127.0.0.1:5432"
+    log "PostgreSQL service did not become ready on ${POSTGRES_HOST}:5432"
     return 1
   fi
 }
@@ -278,7 +275,7 @@ prepare_database_url() {
     run_psql_admin "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER}"
   fi
 
-  DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}?sslmode=disable"
+  DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:5432/${POSTGRES_DB}?sslmode=disable"
   export DATABASE_URL
   log "Using PostgreSQL database: ${POSTGRES_DB}"
 }
