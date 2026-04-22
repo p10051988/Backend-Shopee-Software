@@ -358,7 +358,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("database connect failed: %v", err)
 	}
-	if err := db.AutoMigrate(&License{}, &ModuleVersion{}, &WebUser{}, &SubscriptionPlan{}, &CustomerSubscription{}, &DeviceActivation{}); err != nil {
+	if err := migrateDatabase(db); err != nil {
 		log.Fatalf("auto migrate failed: %v", err)
 	}
 	app := newApp(cfg, db)
@@ -2137,6 +2137,153 @@ func openDatabase(databaseURL string) (*gorm.DB, error) {
 		return gorm.Open(sqlite.Open(sqlitePath), &gorm.Config{})
 	}
 	return gorm.Open(postgres.Open(databaseURL), &gorm.Config{})
+}
+
+func migrateDatabase(db *gorm.DB) error {
+	if db.Dialector.Name() != "postgres" {
+		return db.AutoMigrate(&License{}, &ModuleVersion{}, &WebUser{}, &SubscriptionPlan{}, &CustomerSubscription{}, &DeviceActivation{})
+	}
+
+	serverVersion, err := postgresServerVersionNum(db)
+	if err != nil {
+		return err
+	}
+	if serverVersion >= 90500 {
+		return db.AutoMigrate(&License{}, &ModuleVersion{}, &WebUser{}, &SubscriptionPlan{}, &CustomerSubscription{}, &DeviceActivation{})
+	}
+	return migrateLegacyPostgres(db)
+}
+
+func postgresServerVersionNum(db *gorm.DB) (int, error) {
+	var versionText string
+	if err := db.Raw("SHOW server_version_num").Scan(&versionText).Error; err != nil {
+		return 0, err
+	}
+	versionText = strings.TrimSpace(versionText)
+	versionNum, err := strconv.Atoi(versionText)
+	if err != nil {
+		return 0, fmt.Errorf("parse server_version_num %q: %w", versionText, err)
+	}
+	return versionNum, nil
+}
+
+func migrateLegacyPostgres(db *gorm.DB) error {
+	statements := []string{
+		`CREATE TABLE IF NOT EXISTS licenses (
+			id SERIAL PRIMARY KEY,
+			key VARCHAR(128),
+			machine_id VARCHAR(255),
+			account_username VARCHAR(255),
+			plan_code VARCHAR(255),
+			source VARCHAR(64) DEFAULT 'legacy',
+			notes TEXT,
+			is_active BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMPTZ,
+			activated_at TIMESTAMPTZ,
+			expiration_date TIMESTAMPTZ,
+			duration_days INTEGER DEFAULT 30,
+			session_id VARCHAR(255),
+			session_key VARCHAR(255),
+			session_expiration TIMESTAMPTZ
+		)`,
+		`CREATE TABLE IF NOT EXISTS module_versions (
+			id SERIAL PRIMARY KEY,
+			name VARCHAR(255),
+			version VARCHAR(64),
+			encrypted_code TEXT,
+			hash_checksum VARCHAR(128),
+			created_at TIMESTAMPTZ
+		)`,
+		`CREATE TABLE IF NOT EXISTS web_users (
+			id SERIAL PRIMARY KEY,
+			username VARCHAR(255),
+			email VARCHAR(255),
+			password_hash VARCHAR(512),
+			full_name VARCHAR(255),
+			is_active BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ,
+			notes TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS subscription_plans (
+			id SERIAL PRIMARY KEY,
+			code VARCHAR(255),
+			name VARCHAR(255),
+			duration_label VARCHAR(255),
+			duration_days INTEGER DEFAULT 30,
+			max_devices INTEGER DEFAULT 1,
+			is_active BOOLEAN DEFAULT TRUE,
+			is_trial BOOLEAN DEFAULT FALSE,
+			sort_order INTEGER DEFAULT 100,
+			price_amount INTEGER DEFAULT 0,
+			currency VARCHAR(16) DEFAULT 'VND',
+			price_note VARCHAR(255),
+			external_price_ref VARCHAR(255),
+			created_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ
+		)`,
+		`CREATE TABLE IF NOT EXISTS customer_subscriptions (
+			id SERIAL PRIMARY KEY,
+			user_id INTEGER,
+			plan_code VARCHAR(255),
+			status VARCHAR(64) DEFAULT 'active',
+			starts_at TIMESTAMPTZ,
+			expires_at TIMESTAMPTZ,
+			max_devices INTEGER DEFAULT 1,
+			purchase_ref VARCHAR(255),
+			created_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ,
+			notes TEXT
+		)`,
+		`CREATE TABLE IF NOT EXISTS device_activations (
+			id SERIAL PRIMARY KEY,
+			user_id INTEGER,
+			machine_id VARCHAR(255),
+			device_name VARCHAR(255),
+			device_binding_hash VARCHAR(255),
+			status VARCHAR(64) DEFAULT 'pending',
+			approved_at TIMESTAMPTZ,
+			binding_updated_at TIMESTAMPTZ,
+			last_login_at TIMESTAMPTZ,
+			license_id INTEGER,
+			created_at TIMESTAMPTZ,
+			updated_at TIMESTAMPTZ,
+			notes TEXT
+		)`,
+		legacyCreateIndexSQL("idx_licenses_key", "CREATE UNIQUE INDEX idx_licenses_key ON licenses (key)"),
+		legacyCreateIndexSQL("idx_licenses_machine_id", "CREATE INDEX idx_licenses_machine_id ON licenses (machine_id)"),
+		legacyCreateIndexSQL("idx_licenses_account_username", "CREATE INDEX idx_licenses_account_username ON licenses (account_username)"),
+		legacyCreateIndexSQL("idx_licenses_session_id", "CREATE INDEX idx_licenses_session_id ON licenses (session_id)"),
+		legacyCreateIndexSQL("idx_module_versions_name", "CREATE INDEX idx_module_versions_name ON module_versions (name)"),
+		legacyCreateIndexSQL("idx_web_users_username", "CREATE UNIQUE INDEX idx_web_users_username ON web_users (username)"),
+		legacyCreateIndexSQL("idx_web_users_email", "CREATE UNIQUE INDEX idx_web_users_email ON web_users (email)"),
+		legacyCreateIndexSQL("idx_subscription_plans_code", "CREATE UNIQUE INDEX idx_subscription_plans_code ON subscription_plans (code)"),
+		legacyCreateIndexSQL("idx_customer_subscriptions_user_id", "CREATE INDEX idx_customer_subscriptions_user_id ON customer_subscriptions (user_id)"),
+		legacyCreateIndexSQL("idx_customer_subscriptions_plan_code", "CREATE INDEX idx_customer_subscriptions_plan_code ON customer_subscriptions (plan_code)"),
+		legacyCreateIndexSQL("idx_customer_subscriptions_status", "CREATE INDEX idx_customer_subscriptions_status ON customer_subscriptions (status)"),
+		legacyCreateIndexSQL("idx_customer_subscriptions_expires_at", "CREATE INDEX idx_customer_subscriptions_expires_at ON customer_subscriptions (expires_at)"),
+		legacyCreateIndexSQL("idx_device_activations_user_id", "CREATE INDEX idx_device_activations_user_id ON device_activations (user_id)"),
+		legacyCreateIndexSQL("idx_device_activations_machine_id", "CREATE INDEX idx_device_activations_machine_id ON device_activations (machine_id)"),
+		legacyCreateIndexSQL("idx_device_activations_status", "CREATE INDEX idx_device_activations_status ON device_activations (status)"),
+		legacyCreateIndexSQL("idx_device_activations_license_id", "CREATE INDEX idx_device_activations_license_id ON device_activations (license_id)"),
+	}
+
+	for _, stmt := range statements {
+		if err := db.Exec(stmt).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func legacyCreateIndexSQL(indexName, createSQL string) string {
+	safeName := strings.ReplaceAll(indexName, "'", "''")
+	safeSQL := strings.ReplaceAll(createSQL, "'", "''")
+	return fmt.Sprintf(
+		"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relkind = 'i' AND relname = '%s') THEN EXECUTE '%s'; END IF; END $$;",
+		safeName,
+		safeSQL,
+	)
 }
 
 func sha256HexForInternalBody(body []byte) string {
