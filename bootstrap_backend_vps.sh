@@ -4,15 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
 PORT="${PORT:-8000}"
 VENV_DIR="${VENV_DIR:-.venv}"
-DATABASE_MODE="${DATABASE_MODE:-sqlite}"
+GO_DIR="${GO_DIR:-$SCRIPT_DIR/.go}"
+GO_VERSION="${GO_VERSION:-1.26.1}"
+DATABASE_MODE="${DATABASE_MODE:-postgres}"
 POSTGRES_DB="${POSTGRES_DB:-autoshopee}"
 POSTGRES_USER="${POSTGRES_USER:-autoshopee}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-}"
 MINIFORGE_DIR="${MINIFORGE_DIR:-$SCRIPT_DIR/.miniforge3}"
 MINIFORGE_RELEASE="${MINIFORGE_RELEASE:-25.11.0-1}"
+BACKEND_BIN="${BACKEND_BIN:-$SCRIPT_DIR/bin/backendgo}"
 
 log() {
   echo "[BOOTSTRAP] $*"
@@ -46,21 +48,8 @@ yum_install() {
   run_as_root yum install -y "$@"
 }
 
-detect_python_bin() {
-  for candidate in "$PYTHON_BIN" python3 python36; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      PYTHON_BIN="$candidate"
-      return 0
-    fi
-  done
-  return 1
-}
-
 require_download_tool() {
-  if command -v curl >/dev/null 2>&1; then
-    return 0
-  fi
-  if command -v wget >/dev/null 2>&1; then
+  if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
     return 0
   fi
   if command -v apt-get >/dev/null 2>&1; then
@@ -71,7 +60,7 @@ require_download_tool() {
     yum_install curl || yum_install wget
     return 0
   fi
-  log "Need curl or wget to download Miniforge."
+  log "Need curl or wget."
   exit 1
 }
 
@@ -87,30 +76,9 @@ download_file() {
 }
 
 ensure_python_runtime() {
-  if detect_python_bin; then
+  if [ -x "$MINIFORGE_DIR/bin/python" ]; then
     return 0
   fi
-  if command -v apt-get >/dev/null 2>&1; then
-    apt_install python3 python3-venv python3-pip
-    PYTHON_BIN="python3"
-    return 0
-  fi
-  if command -v yum >/dev/null 2>&1; then
-    yum_install python3 python3-pip || yum_install python36 python36-pip
-    detect_python_bin && return 0
-  fi
-  log "Python runtime not found and could not be installed automatically."
-  exit 1
-}
-
-python_version_supported() {
-  "$PYTHON_BIN" - <<'PY'
-import sys
-raise SystemExit(0 if (3, 11) <= sys.version_info[:2] < (3, 13) else 1)
-PY
-}
-
-install_miniforge_python() {
   local arch
   arch="$(uname -m)"
   case "$arch" in
@@ -124,65 +92,49 @@ install_miniforge_python() {
   local installer="Miniforge3-Linux-${arch}.sh"
   local installer_path="/tmp/${installer}"
   local installer_url="https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_RELEASE}/${installer}"
-  if [ ! -x "$MINIFORGE_DIR/bin/conda" ]; then
-    log "System Python is too old. Installing Miniforge ${MINIFORGE_RELEASE}..."
-    download_file "$installer_url" "$installer_path"
-    bash "$installer_path" -b -p "$MINIFORGE_DIR"
-    rm -f "$installer_path"
-  fi
-  PYTHON_BIN="$MINIFORGE_DIR/bin/python"
+  log "Installing Miniforge ${MINIFORGE_RELEASE}..."
+  download_file "$installer_url" "$installer_path"
+  bash "$installer_path" -b -p "$MINIFORGE_DIR"
+  rm -f "$installer_path"
 }
 
-ensure_modern_python() {
-  ensure_python_runtime
-  if python_version_supported; then
+ensure_go_runtime() {
+  if [ -x "$GO_DIR/bin/go" ]; then
     return 0
   fi
-  install_miniforge_python
-  if ! python_version_supported; then
-    log "Failed to provision a supported Python runtime."
-    exit 1
-  fi
+  local arch
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      log "Unsupported architecture for Go: $arch"
+      exit 1
+      ;;
+  esac
+  local archive="go${GO_VERSION}.linux-${arch}.tar.gz"
+  local archive_path="/tmp/${archive}"
+  local archive_url="https://go.dev/dl/${archive}"
+  log "Installing Go ${GO_VERSION}..."
+  download_file "$archive_url" "$archive_path"
+  rm -rf "$GO_DIR"
+  mkdir -p "$GO_DIR"
+  tar -xzf "$archive_path" -C "$GO_DIR" --strip-components=1
+  rm -f "$archive_path"
 }
-
-ensure_virtualenv() {
-  if "$PYTHON_BIN" -m venv --help >/dev/null 2>&1; then
-    return 0
-  fi
-  "$PYTHON_BIN" -m pip install virtualenv
-  return 0
-}
-
-ensure_modern_python
-
-if [ ! -d "$VENV_DIR" ]; then
-  if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
-    if command -v apt-get >/dev/null 2>&1; then
-      apt_install python3-venv python3-pip
-      "$PYTHON_BIN" -m venv "$VENV_DIR" && :
-    fi
-  fi
-  if [ ! -d "$VENV_DIR" ]; then
-    ensure_virtualenv
-    "$PYTHON_BIN" -m virtualenv "$VENV_DIR"
-  fi
-fi
-
-if [ ! -d "$VENV_DIR" ]; then
-  log "Failed to create virtual environment."
-  exit 1
-fi
-
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
-
-python -m pip install --upgrade pip
-python -m pip install -r Backend/requirements.txt
 
 generate_hex_secret() {
-  "$PYTHON_BIN" - <<'PY'
+  "$MINIFORGE_DIR/bin/python" - <<'PY'
 import secrets
 print(secrets.token_hex(16))
+PY
+}
+
+generate_master_key() {
+  "$MINIFORGE_DIR/bin/python" - <<'PY'
+import base64
+import os
+print(base64.urlsafe_b64encode(os.urandom(32)).decode("ascii"))
 PY
 }
 
@@ -209,78 +161,107 @@ run_psql_admin() {
   exit 1
 }
 
+ensure_postgres_runtime() {
+  if command -v psql >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v apt-get >/dev/null 2>&1; then
+    apt_install postgresql postgresql-contrib
+    return 0
+  fi
+  if command -v yum >/dev/null 2>&1; then
+    yum_install postgresql-server postgresql postgresql-contrib || yum_install postgresql-server postgresql
+    return 0
+  fi
+  log "Cannot install PostgreSQL automatically on this distro."
+  exit 1
+}
+
+init_postgres_if_needed() {
+  if command -v postgresql-setup >/dev/null 2>&1; then
+    if [ ! -f /var/lib/pgsql/data/PG_VERSION ]; then
+      run_as_root postgresql-setup initdb || run_as_root postgresql-setup --initdb || true
+    fi
+  fi
+}
+
 prepare_database_url() {
   if [ -n "${DATABASE_URL:-}" ]; then
-    return
-  fi
-  if [ "$DATABASE_MODE" = "postgres" ]; then
-    ensure_safe_identifier "$POSTGRES_DB" "POSTGRES_DB"
-    ensure_safe_identifier "$POSTGRES_USER" "POSTGRES_USER"
-    if ! command -v psql >/dev/null 2>&1; then
-      if command -v apt-get >/dev/null 2>&1; then
-        apt_install postgresql postgresql-contrib
-      else
-        log "PostgreSQL client/server missing. Install it or set DATABASE_URL manually."
-        exit 1
-      fi
-    fi
-    run_as_root systemctl enable postgresql >/dev/null 2>&1 || true
-    run_as_root systemctl start postgresql >/dev/null 2>&1 || true
-    if [ -z "$POSTGRES_PASSWORD" ]; then
-      POSTGRES_PASSWORD="$(generate_hex_secret)"
-    fi
-    ROLE_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" || true)"
-    if [ -z "$ROLE_EXISTS" ]; then
-      run_psql_admin "CREATE ROLE ${POSTGRES_USER} LOGIN PASSWORD '${POSTGRES_PASSWORD}'"
-    fi
-    DB_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" || true)"
-    if [ -z "$DB_EXISTS" ]; then
-      run_psql_admin "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER}"
-    fi
-    DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}"
     export DATABASE_URL
-    log "Using PostgreSQL database: ${POSTGRES_DB}"
+    log "Using provided DATABASE_URL"
     return
   fi
-  DATABASE_URL="sqlite:///$SCRIPT_DIR/Backend/sql_app.db"
+
+  if [ "$DATABASE_MODE" != "postgres" ]; then
+    DATABASE_URL="sqlite:///$SCRIPT_DIR/Backend/sql_app.db"
+    export DATABASE_URL
+    log "Using SQLite database for local/dev"
+    return
+  fi
+
+  ensure_safe_identifier "$POSTGRES_DB" "POSTGRES_DB"
+  ensure_safe_identifier "$POSTGRES_USER" "POSTGRES_USER"
+  ensure_postgres_runtime
+  init_postgres_if_needed
+  run_as_root systemctl enable postgresql >/dev/null 2>&1 || true
+  run_as_root systemctl start postgresql >/dev/null 2>&1 || true
+
+  if [ -z "$POSTGRES_PASSWORD" ]; then
+    POSTGRES_PASSWORD="$(generate_hex_secret)"
+  fi
+
+  ROLE_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_roles WHERE rolname='${POSTGRES_USER}'" || true)"
+  if [ -z "$ROLE_EXISTS" ]; then
+    run_psql_admin "CREATE ROLE ${POSTGRES_USER} LOGIN PASSWORD '${POSTGRES_PASSWORD}'"
+  fi
+
+  DB_EXISTS="$(run_psql_admin "SELECT 1 FROM pg_database WHERE datname='${POSTGRES_DB}'" || true)"
+  if [ -z "$DB_EXISTS" ]; then
+    run_psql_admin "CREATE DATABASE ${POSTGRES_DB} OWNER ${POSTGRES_USER}"
+  fi
+
+  DATABASE_URL="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@127.0.0.1:5432/${POSTGRES_DB}?sslmode=disable"
   export DATABASE_URL
-  log "Using SQLite database for quickstart"
+  log "Using PostgreSQL database: ${POSTGRES_DB}"
 }
+
+ensure_python_runtime
+ensure_go_runtime
+
+if [ ! -d "$VENV_DIR" ]; then
+  "$MINIFORGE_DIR/bin/python" -m venv "$VENV_DIR"
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+python -m pip install --upgrade pip
+python -m pip install -r BackendGo/requirements-sidecar.txt
 
 prepare_database_url
 
+mkdir -p "$SCRIPT_DIR/bin" "$SCRIPT_DIR/logs" "$SCRIPT_DIR/run"
+
 if [ ! -f ".env" ]; then
-  GENERATED_MASTER_KEY="$(python - <<'PY'
-from cryptography.fernet import Fernet
-print(Fernet.generate_key().decode())
-PY
-)"
-  GENERATED_INTERNAL_SECRET="$(python - <<'PY'
-import secrets
-print(secrets.token_urlsafe(48))
-PY
-)"
+  GENERATED_MASTER_KEY="$(generate_master_key)"
+  GENERATED_INTERNAL_SECRET="$(generate_hex_secret)"
   cat > .env <<EOF
 BACKEND_URL=${BACKEND_PUBLIC_URL:-http://127.0.0.1:${PORT}}
 BACKEND_BIND=0.0.0.0:${PORT}
-BACKEND_WORKERS=2
 CUSTOMER_PORTAL_URL=${CUSTOMER_PORTAL_URL:-}
 DATABASE_URL=${DATABASE_URL}
 INTERNAL_API_SECRET=${INTERNAL_API_SECRET:-$GENERATED_INTERNAL_SECRET}
 MASTER_KEY=${MASTER_KEY:-$GENERATED_MASTER_KEY}
-RELEASE_SIGNING_PRIVATE_KEY=${RELEASE_SIGNING_PRIVATE_KEY:-}
-GUNICORN_PID_FILE=${GUNICORN_PID_FILE:-gunicorn.pid}
-WORKER_METRICS_DIR=${WORKER_METRICS_DIR:-Backend/runtime/worker_metrics}
-WORKER_METRICS_ENABLED=${WORKER_METRICS_ENABLED:-true}
-WORKER_METRICS_FLUSH_SECONDS=${WORKER_METRICS_FLUSH_SECONDS:-2}
+RELEASE_PUBLIC_KEY_B64=${RELEASE_PUBLIC_KEY_B64:-IVQiSVHi/lGaURwMPl69hlysa5iL21fwjeFxzUwItf4=}
+BACKEND_PY_SIDECAR_HOST=${BACKEND_PY_SIDECAR_HOST:-127.0.0.1}
+BACKEND_PY_SIDECAR_PORT=${BACKEND_PY_SIDECAR_PORT:-9801}
+BACKEND_PY_SIDECAR_URL=${BACKEND_PY_SIDECAR_URL:-http://127.0.0.1:9801}
 DEV_MODE=false
 ALLOW_INSECURE_DEFAULTS=false
 EOF
   log "Created .env with generated defaults."
 fi
 
-if [ -n "${BACKEND_PUBLIC_URL:-}" ]; then
-  export BACKEND_URL="$BACKEND_PUBLIC_URL"
-fi
-export BACKEND_BIND="${BACKEND_BIND:-0.0.0.0:$PORT}"
-exec gunicorn -c gunicorn.conf.py Backend.main:app
+export PATH="$GO_DIR/bin:$PATH"
+(cd "$SCRIPT_DIR/BackendGo" && "$GO_DIR/bin/go" mod download && "$GO_DIR/bin/go" build -o "$BACKEND_BIN" .)
+
+bash "$SCRIPT_DIR/start_backend_vps.sh"

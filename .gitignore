@@ -2,6 +2,10 @@ __pycache__/
 *.pyc
 .env
 .venv/
+.miniforge3/
+.go/
+bin/
+logs/
+run/
 Backend/sql_app.db
-gunicorn.pid
 Backend/runtime/
