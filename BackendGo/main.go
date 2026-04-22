@@ -32,7 +32,6 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -1770,7 +1769,7 @@ func (a *App) ensureDefaultPlans(overwriteExisting, overwritePrices bool) error 
 		}
 		if plan == nil {
 			copyValue := definition
-			if err := a.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&copyValue).Error; err != nil {
+			if err := a.db.Create(&copyValue).Error; err != nil {
 				return err
 			}
 			continue
