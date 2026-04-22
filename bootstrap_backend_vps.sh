@@ -210,7 +210,15 @@ wait_for_postgres_ready() {
         return 0
       fi
     elif command -v psql >/dev/null 2>&1; then
-      if PGPASSWORD="$POSTGRES_PASSWORD" psql -h "$POSTGRES_HOST" -p 5432 -U "$POSTGRES_USER" -d postgres -c "SELECT 1" >/dev/null 2>&1; then
+      if run_psql_admin "SELECT 1" >/dev/null 2>&1; then
+        return 0
+      fi
+    elif command -v ss >/dev/null 2>&1; then
+      if ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq '(:|\])5432$'; then
+        return 0
+      fi
+    elif command -v netstat >/dev/null 2>&1; then
+      if netstat -lnt 2>/dev/null | awk '{print $4}' | grep -Eq '(:|\])5432$'; then
         return 0
       fi
     fi
