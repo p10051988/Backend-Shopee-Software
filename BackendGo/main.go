@@ -44,15 +44,18 @@ const (
 )
 
 type Config struct {
-	BindAddress           string
-	DatabaseURL           string
-	MasterKey             string
-	InternalAPISecret     string
-	ReleasePublicKeyB64   string
-	SidecarURL            string
-	DevMode               bool
-	AllowInsecureDefaults bool
-	WorkerMetricsEnabled  bool
+	BindAddress                 string
+	DatabaseURL                 string
+	MasterKey                   string
+	InternalAPISecret           string
+	ReleasePublicKeyB64         string
+	SidecarURL                  string
+	DevMode                     bool
+	AllowInsecureDefaults       bool
+	WorkerMetricsEnabled        bool
+	RuntimeMetricsDir           string
+	RuntimeMetricsRetentionDays int
+	RuntimeMetricsFlushSeconds  int
 }
 
 type App struct {
@@ -106,6 +109,13 @@ type RuntimeMonitor struct {
 	ActiveRequests int
 	Handled        int64
 	StartTime      time.Time
+	Enabled        bool
+	MetricsDir     string
+	RetentionDays  int
+	FlushSeconds   int
+	DayKey         string
+	TodayBaseline  *TrafficAggregate
+	TodaySession   *TrafficAggregate
 }
 
 type License struct {
@@ -386,7 +396,7 @@ func newApp(cfg Config, db *gorm.DB) *App {
 		sessionGuard:       &SessionChallengeGuard{values: map[string]*ChallengeState{}},
 		nonceCache:         NewNonceCache(20000),
 		internalNonceCache: NewNonceCache(20000),
-		runtimeMonitor:     &RuntimeMonitor{StartTime: time.Now().UTC()},
+		runtimeMonitor:     NewRuntimeMonitor(cfg),
 	}
 	router := chi.NewRouter()
 	router.Use(app.trackRuntimeMiddleware)
@@ -415,6 +425,7 @@ func newApp(cfg Config, db *gorm.DB) *App {
 		r.Post("/reset_hwid", app.handleResetHWID)
 		r.Get("/stats", app.handleStats)
 		r.Get("/runtime/workers", app.handleRuntimeWorkers)
+		r.Get("/runtime/traffic", app.handleRuntimeTraffic)
 		r.Post("/runtime/workers/scale", app.handleRuntimeWorkersScale)
 		r.Post("/upload_module", app.handleUploadModule)
 	})
@@ -424,15 +435,18 @@ func newApp(cfg Config, db *gorm.DB) *App {
 
 func loadConfig() Config {
 	return Config{
-		BindAddress:           getenv("BACKEND_BIND", "0.0.0.0:8000"),
-		DatabaseURL:           getenv("DATABASE_URL", "postgresql://autoshopee:autoshopee@localhost:5432/autoshopee?sslmode=disable"),
-		MasterKey:             getenv("MASTER_KEY", ""),
-		InternalAPISecret:     getenv("INTERNAL_API_SECRET", ""),
-		ReleasePublicKeyB64:   getenv("RELEASE_PUBLIC_KEY_B64", publicKeyB64),
-		SidecarURL:            getenv("BACKEND_PY_SIDECAR_URL", "http://127.0.0.1:9801"),
-		DevMode:               getenvBool("DEV_MODE", false),
-		AllowInsecureDefaults: getenvBool("ALLOW_INSECURE_DEFAULTS", false),
-		WorkerMetricsEnabled:  getenvBool("WORKER_METRICS_ENABLED", true),
+		BindAddress:                 getenv("BACKEND_BIND", "0.0.0.0:8000"),
+		DatabaseURL:                 getenv("DATABASE_URL", "postgresql://autoshopee:autoshopee@localhost:5432/autoshopee?sslmode=disable"),
+		MasterKey:                   getenv("MASTER_KEY", ""),
+		InternalAPISecret:           getenv("INTERNAL_API_SECRET", ""),
+		ReleasePublicKeyB64:         getenv("RELEASE_PUBLIC_KEY_B64", publicKeyB64),
+		SidecarURL:                  getenv("BACKEND_PY_SIDECAR_URL", "http://127.0.0.1:9801"),
+		DevMode:                     getenvBool("DEV_MODE", false),
+		AllowInsecureDefaults:       getenvBool("ALLOW_INSECURE_DEFAULTS", false),
+		WorkerMetricsEnabled:        getenvBool("WORKER_METRICS_ENABLED", true),
+		RuntimeMetricsDir:           getenv("RUNTIME_METRICS_DIR", "logs/runtime-metrics"),
+		RuntimeMetricsRetentionDays: maxInt(getenvInt("RUNTIME_METRICS_RETENTION_DAYS", 90), 1),
+		RuntimeMetricsFlushSeconds:  maxInt(getenvInt("RUNTIME_METRICS_FLUSH_SECONDS", 30), 5),
 	}
 }
 
@@ -450,6 +464,18 @@ func getenvBool(key string, fallback bool) bool {
 		return fallback
 	}
 	return raw == "1" || raw == "true" || raw == "yes" || raw == "on"
+}
+
+func getenvInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 func NewNonceCache(maxItems int) *NonceCache {
@@ -598,23 +624,34 @@ func challengeStateToMap(state *ChallengeState) map[string]any {
 func (m *RuntimeMonitor) started() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.rolloverIfNeededLocked(time.Now().UTC())
 	m.ActiveRequests++
 }
 
-func (m *RuntimeMonitor) finished() {
+func (m *RuntimeMonitor) finished(method string, route string, status int, elapsed time.Duration) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.rolloverIfNeededLocked(time.Now().UTC())
 	if m.ActiveRequests > 0 {
 		m.ActiveRequests--
 	}
 	m.Handled++
+	m.recordRequestLocked(method, route, status, elapsed)
 }
 
 func (a *App) trackRuntimeMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recorder := newStatusRecorder(w)
+		startedAt := time.Now()
 		a.runtimeMonitor.started()
-		defer a.runtimeMonitor.finished()
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(recorder, r)
+		route := r.URL.Path
+		if routeCtx := chi.RouteContext(r.Context()); routeCtx != nil {
+			if pattern := strings.TrimSpace(routeCtx.RoutePattern()); pattern != "" {
+				route = pattern
+			}
+		}
+		a.runtimeMonitor.finished(r.Method, route, recorder.Status(), time.Since(startedAt))
 	})
 }
 
@@ -2056,8 +2093,11 @@ func canonicalJSON(data map[string]any) (string, error) {
 		if index > 0 {
 			buf.WriteByte(',')
 		}
-		keyJSON, _ := json.Marshal(key)
-		valueJSON, err := json.Marshal(data[key])
+		keyJSON, err := marshalJSONNoEscape(key)
+		if err != nil {
+			return "", err
+		}
+		valueJSON, err := marshalJSONNoEscape(data[key])
 		if err != nil {
 			return "", err
 		}
@@ -2067,6 +2107,16 @@ func canonicalJSON(data map[string]any) (string, error) {
 	}
 	buf.WriteByte('}')
 	return buf.String(), nil
+}
+
+func marshalJSONNoEscape(value any) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	encoder := json.NewEncoder(buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func signHMAC(secret string, message string) string {
