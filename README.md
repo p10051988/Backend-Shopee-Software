@@ -164,3 +164,13 @@ git clone <your-backend-repo> Backend-Shopee-Software && cd Backend-Shopee-Softw
 ```bash
 cd ~/Backend-Shopee-Software && bash start_backend_vps.sh
 ```
+
+- Neu can chuyen nhanh sang VPS moi:
+
+```bash
+# Tren VPS cu
+cd ~/Backend-Shopee-Software && bash backup_backend_vps.sh
+
+# Copy file backup-backend-*.tar.gz sang VPS moi, roi tren VPS moi:
+bash restore_backend_vps.sh /abs/path/backend-backup-YYYYMMDD-HHMMSS.tar.gz
+```
