@@ -171,6 +171,13 @@ cd ~/Backend-Shopee-Software && bash start_backend_vps.sh
 # Tren VPS cu
 cd ~/Backend-Shopee-Software && bash backup_backend_vps.sh
 
-# Copy file backup-backend-*.tar.gz sang VPS moi, roi tren VPS moi:
+# Chuyen file backup sang VPS moi bang scp/mac dinh:
+bash transfer_backend_backup.sh /abs/path/backend-backup-YYYYMMDD-HHMMSS.tar.gz user@new-vps
+
+# Neu muon, co the doi qua rsync hoac sftp:
+TRANSFER_MODE=rsync bash transfer_backend_backup.sh /abs/path/backend-backup-YYYYMMDD-HHMMSS.tar.gz user@new-vps
+TRANSFER_MODE=sftp  bash transfer_backend_backup.sh /abs/path/backend-backup-YYYYMMDD-HHMMSS.tar.gz user@new-vps
+
+# Tren VPS moi:
 bash restore_backend_vps.sh /abs/path/backend-backup-YYYYMMDD-HHMMSS.tar.gz
 ```
