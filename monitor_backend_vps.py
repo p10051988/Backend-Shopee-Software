@@ -47,7 +47,8 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
     width = size.columns
     system = snapshot.get("system") or {}
     process = snapshot.get("process") or {}
-    traffic = snapshot.get("traffic") or {}
+    traffic = snapshot.get("app_traffic") or {}
+    raw_traffic = snapshot.get("traffic") or {}
     connections = snapshot.get("connections") or {}
     health = snapshot.get("health") or {}
     stats = snapshot.get("stats") or {}
@@ -79,7 +80,7 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
     lines.append(
         f" Uptime: {format_duration(int(system.get('uptime_seconds', 0)))}"
         f"  |  Load Avg: {load_avg[0]:.2f}, {load_avg[1]:.2f}, {load_avg[2]:.2f}"
-        f"  |  Backend uptime: {format_duration(int(traffic.get('server_uptime_seconds', 0)))}"
+        f"  |  Backend uptime: {format_duration(int(raw_traffic.get('server_uptime_seconds', 0)))}"
     )
     lines.append(draw_line(width, "-"))
     lines.append(
@@ -91,16 +92,17 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
     lines.append(
         f" DB Live Sessions: {stats.get('live_sessions_db', 0)}"
         f"  |  Active Sessions(DB any): {stats.get('active_sessions', 0)}"
-        f"  |  Inflight: {traffic.get('inflight_requests', 0)}"
-        f"  |  Handled Since Boot: {traffic.get('handled_requests_since_boot', 0)}"
+        f"  |  Inflight: {raw_traffic.get('inflight_requests', 0)}"
+        f"  |  Handled Since Boot: {raw_traffic.get('handled_requests_since_boot', 0)}"
     )
     lines.append(draw_line(width, "-"))
     lines.append(
-        f" Requests Total: {traffic.get('total_requests', 0)}"
+        f" App Requests: {traffic.get('total_requests', 0)}"
         f"  |  Success: {traffic.get('total_ok', 0)}"
         f"  |  Fail: {traffic.get('total_errors', 0)}"
         f"  |  Error Rate: {traffic.get('error_rate_percent', 0)}%"
     )
+    lines.append(f" Monitor/Admin Requests Hidden: {traffic.get('monitor_requests_hidden', 0)}")
     lines.append(
         f" Latency Avg: {traffic.get('avg_latency_ms', 0)} ms"
         f"  |  P95: {traffic.get('p95_latency_ms', 0)} ms"

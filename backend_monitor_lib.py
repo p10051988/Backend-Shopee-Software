@@ -24,6 +24,15 @@ for candidate in REPO_ROOT_CANDIDATES:
 
 from app_security import current_timestamp, new_nonce, sign_internal_request  # noqa: E402
 
+MONITOR_ROUTE_KEYS = {
+    "GET /",
+    "GET /favicon.ico",
+    "GET /api/public/health",
+    "GET /api/internal/stats",
+    "GET /api/internal/runtime/connections",
+    "GET /api/internal/runtime/traffic",
+}
+
 
 @dataclass
 class MonitorConfig:
@@ -273,13 +282,58 @@ def safe_fetch(config: MonitorConfig) -> dict[str, Any]:
         "sidecar_pid": sidecar_pid,
         "sidecar_running": sidecar_running,
     }
+    payload["app_traffic"] = build_app_traffic_summary(payload.get("traffic") or {})
     return payload
+
+
+def build_app_traffic_summary(traffic: dict[str, Any]) -> dict[str, Any]:
+    routes = []
+    monitor_requests = 0
+    total_requests = 0
+    total_ok = 0
+    total_errors = 0
+    weighted_latency = 0.0
+    p95_latency = 0.0
+    max_latency = 0.0
+    for item in traffic.get("routes") or []:
+        route = str(item.get("route") or "")
+        requests = int(item.get("requests") or 0)
+        if route in MONITOR_ROUTE_KEYS:
+            monitor_requests += requests
+            continue
+        routes.append(item)
+        ok = int(item.get("ok") or 0)
+        errors = int(item.get("errors") or 0)
+        avg = float(item.get("avg_latency_ms") or 0)
+        p95 = float(item.get("p95_latency_ms") or 0)
+        max_value = float(item.get("max_latency_ms") or 0)
+        total_requests += requests
+        total_ok += ok
+        total_errors += errors
+        weighted_latency += avg * requests
+        if p95 > p95_latency:
+            p95_latency = p95
+        if max_value > max_latency:
+            max_latency = max_value
+    avg_latency = round(weighted_latency / total_requests, 2) if total_requests else 0.0
+    error_rate = round((total_errors / total_requests) * 100, 2) if total_requests else 0.0
+    return {
+        "total_requests": total_requests,
+        "total_ok": total_ok,
+        "total_errors": total_errors,
+        "error_rate_percent": error_rate,
+        "avg_latency_ms": avg_latency,
+        "p95_latency_ms": p95_latency,
+        "max_latency_ms": max_latency,
+        "monitor_requests_hidden": monitor_requests,
+        "routes": routes,
+    }
 
 
 def classify_state(snapshot: dict[str, Any], config: MonitorConfig) -> tuple[str, list[str]]:
     reasons: list[str] = []
     health = snapshot.get("health") or {}
-    traffic = snapshot.get("traffic") or {}
+    traffic = snapshot.get("app_traffic") or {}
     system = snapshot.get("system") or {}
     if not health or health.get("status") != "ok":
         reasons.append("backend health is not ok")
@@ -337,7 +391,7 @@ def save_state_file(path: Path, payload: dict[str, Any]) -> None:
 
 
 def build_alert_message(snapshot: dict[str, Any], status: str, reasons: list[str]) -> str:
-    traffic = snapshot.get("traffic") or {}
+    traffic = snapshot.get("app_traffic") or {}
     connections = snapshot.get("connections") or {}
     system = snapshot.get("system") or {}
     lines = [
