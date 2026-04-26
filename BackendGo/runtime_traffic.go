@@ -75,9 +75,11 @@ func NewRuntimeMonitor(cfg Config) *RuntimeMonitor {
 		MetricsDir:    strings.TrimSpace(cfg.RuntimeMetricsDir),
 		RetentionDays: maxInt(cfg.RuntimeMetricsRetentionDays, 1),
 		FlushSeconds:  maxInt(cfg.RuntimeMetricsFlushSeconds, 5),
+		OnlineWindow:  time.Duration(maxInt(cfg.HeartbeatIntervalSeconds+cfg.HeartbeatJitterSeconds+30, 60)) * time.Second,
 		DayKey:        now.Format("2006-01-02"),
 		TodayBaseline: newTrafficAggregate(),
 		TodaySession:  newTrafficAggregate(),
+		Sessions:      map[string]*RuntimeSessionInfo{},
 	}
 	monitor.initializePersistence()
 	return monitor
@@ -350,6 +352,122 @@ func (m *RuntimeMonitor) cleanupOldSnapshots() {
 	}
 }
 
+func (m *RuntimeMonitor) cleanupSessionsLocked(now time.Time) {
+	for sessionID, item := range m.Sessions {
+		if item == nil {
+			delete(m.Sessions, sessionID)
+			continue
+		}
+		if !item.SessionExpiresAt.IsZero() && now.After(item.SessionExpiresAt) {
+			delete(m.Sessions, sessionID)
+			continue
+		}
+		if !item.LastSeenAt.IsZero() && now.Sub(item.LastSeenAt) > (m.OnlineWindow * 2) {
+			delete(m.Sessions, sessionID)
+		}
+	}
+}
+
+func (m *RuntimeMonitor) TouchSession(sessionID, accountUsername, machineID, route string, expiresAt time.Time) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	now := time.Now().UTC()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupSessionsLocked(now)
+	item := m.Sessions[sessionID]
+	if item == nil {
+		item = &RuntimeSessionInfo{
+			SessionID: sessionID,
+			StartedAt: now,
+		}
+		m.Sessions[sessionID] = item
+	}
+	if strings.TrimSpace(accountUsername) != "" {
+		item.AccountUsername = strings.TrimSpace(accountUsername)
+	}
+	if strings.TrimSpace(machineID) != "" {
+		item.MachineID = strings.TrimSpace(machineID)
+	}
+	item.LastSeenAt = now
+	if route == "heartbeat" {
+		item.LastHeartbeatAt = now
+	}
+	if !expiresAt.IsZero() {
+		item.SessionExpiresAt = expiresAt.UTC()
+	}
+	if strings.TrimSpace(route) != "" {
+		item.LastRoute = route
+	}
+}
+
+func (m *RuntimeMonitor) ClearSession(sessionID string) {
+	if strings.TrimSpace(sessionID) == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.Sessions, sessionID)
+}
+
+func (m *RuntimeMonitor) buildConnectionReport(includeSessions bool) map[string]any {
+	m.mu.Lock()
+	now := time.Now().UTC()
+	m.cleanupSessionsLocked(now)
+	window := m.OnlineWindow
+	activeSessions := make([]RuntimeSessionInfo, 0, len(m.Sessions))
+	activeUsers := map[string]struct{}{}
+	activeDevices := map[string]struct{}{}
+	authoritativeUsers := map[string]struct{}{}
+	authoritativeDevices := map[string]struct{}{}
+	authoritativeSessions := int64(0)
+	for _, item := range m.Sessions {
+		if item == nil {
+			continue
+		}
+		if !item.LastSeenAt.IsZero() && now.Sub(item.LastSeenAt) <= window {
+			activeSessions = append(activeSessions, *item)
+			if value := strings.TrimSpace(item.AccountUsername); value != "" {
+				activeUsers[value] = struct{}{}
+			}
+			if value := strings.TrimSpace(item.MachineID); value != "" {
+				activeDevices[value] = struct{}{}
+			}
+		}
+		if !item.LastHeartbeatAt.IsZero() && now.Sub(item.LastHeartbeatAt) <= window {
+			authoritativeSessions++
+			if value := strings.TrimSpace(item.AccountUsername); value != "" {
+				authoritativeUsers[value] = struct{}{}
+			}
+			if value := strings.TrimSpace(item.MachineID); value != "" {
+				authoritativeDevices[value] = struct{}{}
+			}
+		}
+	}
+	m.mu.Unlock()
+
+	sort.Slice(activeSessions, func(i, j int) bool {
+		return activeSessions[i].LastSeenAt.After(activeSessions[j].LastSeenAt)
+	})
+
+	payload := map[string]any{
+		"generated_at":                  now,
+		"online_window_seconds":         int(window.Seconds()),
+		"counting_rule":                 "authoritative_online_* counts unique accounts/devices with fresh heartbeat inside the online window",
+		"active_runtime_sessions":       len(activeSessions),
+		"active_runtime_users":          len(activeUsers),
+		"active_runtime_devices":        len(activeDevices),
+		"authoritative_online_sessions": authoritativeSessions,
+		"authoritative_online_users":    len(authoritativeUsers),
+		"authoritative_online_devices":  len(authoritativeDevices),
+	}
+	if includeSessions {
+		payload["sessions"] = activeSessions
+	}
+	return payload
+}
+
 func (m *RuntimeMonitor) buildTrafficReport(windowDays int) map[string]any {
 	m.mu.Lock()
 	m.rolloverIfNeededLocked(time.Now().UTC())
@@ -404,6 +522,7 @@ func (m *RuntimeMonitor) buildTrafficReport(windowDays int) map[string]any {
 	})
 
 	totalSummary := summarizeRoute("total", combined.Total)
+	connectionSummary := m.buildConnectionReport(false)
 	return map[string]any{
 		"window_days":                 windowDays,
 		"retention_days":              retentionDays,
@@ -419,6 +538,7 @@ func (m *RuntimeMonitor) buildTrafficReport(windowDays int) map[string]any {
 		"avg_latency_ms":              totalSummary.AvgLatencyMs,
 		"p95_latency_ms":              totalSummary.P95LatencyMs,
 		"max_latency_ms":              totalSummary.MaxLatencyMs,
+		"connections":                 connectionSummary,
 		"routes":                      routes,
 	}
 }

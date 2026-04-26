@@ -9,3 +9,5 @@ logs/
 run/
 Backend/sql_app.db
 Backend/runtime/
+BackendGo/backendgo.exe
+BackendGo/backendgo.exe~

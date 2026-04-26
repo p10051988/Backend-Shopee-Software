@@ -56,6 +56,8 @@ type Config struct {
 	RuntimeMetricsDir           string
 	RuntimeMetricsRetentionDays int
 	RuntimeMetricsFlushSeconds  int
+	HeartbeatIntervalSeconds    int
+	HeartbeatJitterSeconds      int
 }
 
 type App struct {
@@ -113,9 +115,22 @@ type RuntimeMonitor struct {
 	MetricsDir     string
 	RetentionDays  int
 	FlushSeconds   int
+	OnlineWindow   time.Duration
 	DayKey         string
 	TodayBaseline  *TrafficAggregate
 	TodaySession   *TrafficAggregate
+	Sessions       map[string]*RuntimeSessionInfo
+}
+
+type RuntimeSessionInfo struct {
+	SessionID        string    `json:"session_id"`
+	AccountUsername  string    `json:"account_username"`
+	MachineID        string    `json:"machine_id"`
+	StartedAt        time.Time `json:"started_at"`
+	LastSeenAt       time.Time `json:"last_seen_at"`
+	LastHeartbeatAt  time.Time `json:"last_heartbeat_at"`
+	SessionExpiresAt time.Time `json:"session_expires_at"`
+	LastRoute        string    `json:"last_route"`
 }
 
 type License struct {
@@ -425,6 +440,7 @@ func newApp(cfg Config, db *gorm.DB) *App {
 		r.Post("/reset_hwid", app.handleResetHWID)
 		r.Get("/stats", app.handleStats)
 		r.Get("/runtime/workers", app.handleRuntimeWorkers)
+		r.Get("/runtime/connections", app.handleRuntimeConnections)
 		r.Get("/runtime/traffic", app.handleRuntimeTraffic)
 		r.Post("/runtime/workers/scale", app.handleRuntimeWorkersScale)
 		r.Post("/upload_module", app.handleUploadModule)
@@ -447,6 +463,8 @@ func loadConfig() Config {
 		RuntimeMetricsDir:           getenv("RUNTIME_METRICS_DIR", "logs/runtime-metrics"),
 		RuntimeMetricsRetentionDays: maxInt(getenvInt("RUNTIME_METRICS_RETENTION_DAYS", 90), 1),
 		RuntimeMetricsFlushSeconds:  maxInt(getenvInt("RUNTIME_METRICS_FLUSH_SECONDS", 30), 5),
+		HeartbeatIntervalSeconds:    maxInt(getenvInt("HEARTBEAT_INTERVAL_SECONDS", 75), 30),
+		HeartbeatJitterSeconds:      maxInt(getenvInt("HEARTBEAT_JITTER_SECONDS", 15), 0),
 	}
 }
 
@@ -943,6 +961,7 @@ func (a *App) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 		"issued_at":              currentTimestamp(),
 	}
 	response["response_signature"] = signServerResponse(licenseItem.SessionKey, response)
+	a.runtimeMonitor.TouchSession(req.SessionID, licenseItem.AccountUsername, licenseItem.MachineID, "heartbeat", licenseItem.SessionExpiration.UTC())
 	_ = challengeState
 	writeJSON(w, http.StatusOK, response)
 }
@@ -988,6 +1007,7 @@ func (a *App) handleFetchModule(w http.ResponseWriter, r *http.Request) {
 		"issued_at":      currentTimestamp(),
 	}
 	response["response_signature"] = signServerResponse(licenseItem.SessionKey, response)
+	a.runtimeMonitor.TouchSession(req.SessionID, licenseItem.AccountUsername, licenseItem.MachineID, "fetch_module:"+req.ModuleName, licenseItem.SessionExpiration.UTC())
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1061,6 +1081,7 @@ func (a *App) handleSolvePuzzle(w http.ResponseWriter, r *http.Request) {
 		"issued_at":     currentTimestamp(),
 	}
 	response["response_signature"] = signServerResponse(licenseItem.SessionKey, response)
+	a.runtimeMonitor.TouchSession(req.SessionID, licenseItem.AccountUsername, licenseItem.MachineID, "puzzle/solve:"+req.Type, licenseItem.SessionExpiration.UTC())
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -1470,13 +1491,15 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 		return c
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"total_licenses":       count(&License{}, ""),
-		"active_sessions":      count(&License{}, "session_id <> ''"),
-		"total_users":          count(&WebUser{}, ""),
-		"total_devices":        count(&DeviceActivation{}, ""),
-		"active_subscriptions": count(&CustomerSubscription{}, "status = ?", "active"),
-		"total_plans":          count(&SubscriptionPlan{}, ""),
-		"server_status":        "online",
+		"total_licenses":              count(&License{}, ""),
+		"active_sessions":             count(&License{}, "session_id <> ''"),
+		"live_sessions_db":            count(&License{}, "session_id <> '' AND session_expiration IS NOT NULL AND session_expiration > ?", time.Now().UTC()),
+		"total_users":                 count(&WebUser{}, ""),
+		"total_devices":               count(&DeviceActivation{}, ""),
+		"active_subscriptions":        count(&CustomerSubscription{}, "status = ?", "active"),
+		"total_plans":                 count(&SubscriptionPlan{}, ""),
+		"server_status":               "online",
+		"runtime_connection_overview": a.runtimeMonitor.buildConnectionReport(false),
 	})
 }
 
@@ -1493,6 +1516,11 @@ func (a *App) handleRuntimeWorkers(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds":    int(time.Since(a.runtimeMonitor.StartTime).Seconds()),
 		"pid":               os.Getpid(),
 	})
+}
+
+func (a *App) handleRuntimeConnections(w http.ResponseWriter, r *http.Request) {
+	includeSessions := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("include_sessions")), "true")
+	writeJSON(w, http.StatusOK, a.runtimeMonitor.buildConnectionReport(includeSessions))
 }
 
 func (a *App) handleRuntimeWorkersScale(w http.ResponseWriter, r *http.Request) {
@@ -1697,6 +1725,7 @@ func (a *App) issueSessionForLicense(licenseItem *License, buildID string, accou
 		return nil, err
 	}
 	challenge := a.sessionGuard.Bootstrap(sessionID, expiration, fallbackString(buildID, "DEV-SOURCE"))
+	a.runtimeMonitor.TouchSession(sessionID, licenseItem.AccountUsername, licenseItem.MachineID, "session-issued", expiration)
 	return buildSessionResponse(licenseItem, challenge, accountContext), nil
 }
 
@@ -1957,6 +1986,7 @@ func buildAccountContext(user WebUser, subscription CustomerSubscription, device
 
 func (a *App) clearLicenseSession(licenseItem *License) {
 	a.sessionGuard.Clear(licenseItem.SessionID)
+	a.runtimeMonitor.ClearSession(licenseItem.SessionID)
 	licenseItem.SessionID = ""
 	licenseItem.SessionKey = ""
 	licenseItem.SessionExpiration = nil
