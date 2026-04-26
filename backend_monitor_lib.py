@@ -33,6 +33,16 @@ MONITOR_ROUTE_KEYS = {
     "GET /api/internal/runtime/traffic",
 }
 
+APP_ROUTE_KEYS = {
+    "GET /api/public/plans",
+    "POST /verify_license",
+    "POST /api/public/login",
+    "POST /api/public/access-key-login",
+    "POST /fetch_module",
+    "POST /heartbeat",
+    "POST /puzzle/solve",
+}
+
 
 @dataclass
 class MonitorConfig:
@@ -288,7 +298,10 @@ def safe_fetch(config: MonitorConfig) -> dict[str, Any]:
 
 def build_app_traffic_summary(traffic: dict[str, Any]) -> dict[str, Any]:
     routes = []
+    noise_routes = []
     monitor_requests = 0
+    external_noise_requests = 0
+    external_noise_errors = 0
     total_requests = 0
     total_ok = 0
     total_errors = 0
@@ -298,8 +311,13 @@ def build_app_traffic_summary(traffic: dict[str, Any]) -> dict[str, Any]:
     for item in traffic.get("routes") or []:
         route = str(item.get("route") or "")
         requests = int(item.get("requests") or 0)
-        if route in MONITOR_ROUTE_KEYS:
+        if route in MONITOR_ROUTE_KEYS or route.startswith("GET /api/internal/") or route.startswith("POST /api/internal/"):
             monitor_requests += requests
+            continue
+        if route not in APP_ROUTE_KEYS:
+            external_noise_requests += requests
+            external_noise_errors += int(item.get("errors") or 0)
+            noise_routes.append(item)
             continue
         routes.append(item)
         ok = int(item.get("ok") or 0)
@@ -326,7 +344,10 @@ def build_app_traffic_summary(traffic: dict[str, Any]) -> dict[str, Any]:
         "p95_latency_ms": p95_latency,
         "max_latency_ms": max_latency,
         "monitor_requests_hidden": monitor_requests,
+        "external_noise_requests_hidden": external_noise_requests,
+        "external_noise_errors_hidden": external_noise_errors,
         "routes": routes,
+        "noise_routes": noise_routes,
     }
 
 

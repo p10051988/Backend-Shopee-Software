@@ -53,6 +53,7 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
     health = snapshot.get("health") or {}
     stats = snapshot.get("stats") or {}
     routes = list((traffic.get("routes") or []))[:6]
+    noise_routes = list((traffic.get("noise_routes") or []))[:6]
     sessions = list((connections.get("sessions") or []))[:6]
     status_color = color_for_status(status)
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -104,6 +105,10 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
     )
     lines.append(f" Monitor/Admin Requests Hidden: {traffic.get('monitor_requests_hidden', 0)}")
     lines.append(
+        f" External Noise Hidden: {traffic.get('external_noise_requests_hidden', 0)}"
+        f"  |  Noise Fail: {traffic.get('external_noise_errors_hidden', 0)}"
+    )
+    lines.append(
         f" Latency Avg: {traffic.get('avg_latency_ms', 0)} ms"
         f"  |  P95: {traffic.get('p95_latency_ms', 0)} ms"
         f"  |  Max: {traffic.get('max_latency_ms', 0)} ms"
@@ -119,7 +124,16 @@ def render(snapshot: dict, status: str, reasons: list[str]) -> str:
                 f" p95={item.get('p95_latency_ms', 0):>7}ms"
             )
     else:
-        lines.append(" - no route data yet")
+        lines.append(" - no app/user route data yet")
+    if noise_routes:
+        lines.append(draw_line(width, "-"))
+        lines.append(f"{BOLD} Recent External Noise / Probes{RESET}")
+        for item in noise_routes:
+            route = (item.get("route") or "-")[:44]
+            lines.append(
+                f" - {route:<44} req={item.get('requests', 0):>6} ok={item.get('ok', 0):>6}"
+                f" err={item.get('errors', 0):>5}"
+            )
     lines.append(draw_line(width, "-"))
     lines.append(f"{BOLD} Recent Online Sessions{RESET}")
     if sessions:
