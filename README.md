@@ -27,6 +27,14 @@ bash start_backend_vps.sh
 
 ## Panel monitor realtime
 
+## Backend control menu
+
+```bash
+bash backend_control_vps.sh
+```
+
+Menu nay gom update tu GitHub, start/restart/stop backend, monitor panel, backup, transfer backup, auto backup cron va logs.
+
 ```bash
 bash monitor_backend_vps.sh
 ```
