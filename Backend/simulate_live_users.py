@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -52,6 +53,8 @@ DEFAULT_MODULES = [
     "reply_rating",
     "get_order_list_impl",
 ]
+
+SERVER_TIME_OFFSET_SECONDS = 0
 
 
 @dataclass
@@ -135,7 +138,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--password", default="Bench@123456")
     parser.add_argument("--accounts-file", default="", help="JSON file with [{username,password,machine_id,device_name,access_key}]")
     parser.add_argument("--module-list", default=",".join(DEFAULT_MODULES))
+    parser.add_argument("--heartbeat-ratio", type=float, default=0.55, help="Probability of heartbeat per interaction; use 1.0 when modules are not seeded")
     parser.add_argument("--build-id", default="DEV-SOURCE")
+    parser.add_argument("--build-attestation-file", default="", help="release_manifest.json path for production build attestation")
     parser.add_argument("--request-timeout", type=float, default=12.0)
     return parser.parse_args()
 
@@ -156,6 +161,20 @@ def users_to_jsonable(users: list[VirtualUser]) -> list[dict[str, str]]:
         }
         for user in users
     ]
+
+
+def load_build_attestation(args: argparse.Namespace) -> dict[str, Any]:
+    if not args.build_attestation_file:
+        return {}
+    path = Path(args.build_attestation_file)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"build attestation file is not a JSON object: {path}")
+    if args.build_id == "DEV-SOURCE":
+        build_nonce = str(payload.get("build_nonce") or "")
+        if build_nonce:
+            args.build_id = build_nonce
+    return payload
 
 
 def json_request(
@@ -188,7 +207,13 @@ def json_request(
             payload_obj = json.loads(raw)
         except Exception:
             payload_obj = raw
-        return int(exc.code), payload_obj, elapsed_ms, f"http:{exc.code}"
+        detail = ""
+        if isinstance(payload_obj, dict):
+            detail = str(payload_obj.get("detail") or payload_obj.get("error") or "")
+        elif isinstance(payload_obj, str):
+            detail = payload_obj[:120]
+        suffix = f":{detail}" if detail else ""
+        return int(exc.code), payload_obj, elapsed_ms, f"http:{exc.code}{suffix}"
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         return 0, "", elapsed_ms, type(exc).__name__
@@ -196,6 +221,31 @@ def json_request(
 
 def build_url(base_url: str, path: str) -> str:
     return urllib.parse.urljoin(base_url.rstrip("/") + "/", path.lstrip("/"))
+
+
+def parse_server_timestamp(value: str) -> int:
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return int(parsed.timestamp())
+
+
+def sync_server_clock(base_url: str, timeout: float) -> int:
+    global SERVER_TIME_OFFSET_SECONDS
+    status, data, _elapsed_ms, error_key = json_request("GET", build_url(base_url, "/api/public/health"), timeout=timeout)
+    if status != 200 or not isinstance(data, dict):
+        raise RuntimeError(f"server time sync failed: {status} {error_key}")
+    server_ts = parse_server_timestamp(str(data.get("time") or ""))
+    local_ts = current_timestamp()
+    SERVER_TIME_OFFSET_SECONDS = server_ts - local_ts
+    return SERVER_TIME_OFFSET_SECONDS
+
+
+def server_timestamp() -> int:
+    return current_timestamp() + SERVER_TIME_OFFSET_SECONDS
 
 
 def build_internal_headers(secret: str, method: str, path: str, body: dict | None) -> dict[str, str]:
@@ -217,7 +267,7 @@ def build_session_body(user: VirtualUser, module_name: str, build_id: str) -> di
         "module_name": module_name,
         "sync_token": user.sync_token,
         "nonce": new_nonce(),
-        "timestamp": current_timestamp(),
+        "timestamp": server_timestamp(),
     }
     payload["signature"] = sign_session_payload(user.session_key, payload)
     return payload
@@ -266,7 +316,7 @@ def verify_heartbeat_response(user: VirtualUser, data: dict[str, Any]) -> tuple[
     return True, ""
 
 
-def account_login(base_url: str, user: VirtualUser, build_id: str, timeout: float) -> tuple[int, float, str]:
+def account_login(base_url: str, user: VirtualUser, build_id: str, build_attestation: dict[str, Any], timeout: float) -> tuple[int, float, str]:
     body = {
         "username": user.username,
         "password": user.password,
@@ -274,7 +324,7 @@ def account_login(base_url: str, user: VirtualUser, build_id: str, timeout: floa
         "device_name": user.device_name,
         "device_binding": f"bind-{user.machine_id}",
         "build_id": build_id,
-        "build_attestation": {},
+        "build_attestation": build_attestation,
     }
     status, data, elapsed_ms, error_key = json_request("POST", build_url(base_url, "/api/public/login"), body=body, timeout=timeout)
     if status == 200 and isinstance(data, dict):
@@ -290,14 +340,14 @@ def account_login(base_url: str, user: VirtualUser, build_id: str, timeout: floa
     return status, elapsed_ms, error_key or "login_failed"
 
 
-def access_key_login(base_url: str, user: VirtualUser, build_id: str, timeout: float) -> tuple[int, float, str]:
+def access_key_login(base_url: str, user: VirtualUser, build_id: str, build_attestation: dict[str, Any], timeout: float) -> tuple[int, float, str]:
     body = {
         "access_key": user.access_key,
         "machine_id": user.machine_id,
         "device_name": user.device_name,
         "device_binding": f"bind-{user.machine_id}",
         "build_id": build_id,
-        "build_attestation": {},
+        "build_attestation": build_attestation,
     }
     status, data, elapsed_ms, error_key = json_request("POST", build_url(base_url, "/api/public/access-key-login"), body=body, timeout=timeout)
     if status == 200 and isinstance(data, dict):
@@ -459,20 +509,21 @@ def simulate_authenticated_user(
     book: ResultBook,
     user: VirtualUser,
     modules: list[str],
+    build_attestation: dict[str, Any],
 ) -> None:
     if args.startup_spread > 0:
         time.sleep(random.uniform(0.0, args.startup_spread))
     if args.mode == "account":
-        status, elapsed_ms, error_key = account_login(base_url, user, args.build_id, args.request_timeout)
+        status, elapsed_ms, error_key = account_login(base_url, user, args.build_id, build_attestation, args.request_timeout)
         book.record("login", status, elapsed_ms, error_key)
     else:
-        status, elapsed_ms, error_key = access_key_login(base_url, user, args.build_id, args.request_timeout)
+        status, elapsed_ms, error_key = access_key_login(base_url, user, args.build_id, build_attestation, args.request_timeout)
         book.record("access-key-login", status, elapsed_ms, error_key)
     if error_key:
         return
 
     while time.time() < stop_at:
-        if random.random() < 0.55:
+        if not modules or random.random() < max(0.0, min(args.heartbeat_ratio, 1.0)):
             status, elapsed_ms, error_key = do_heartbeat(base_url, user, args.build_id, args.request_timeout)
             book.record("heartbeat", status, elapsed_ms, error_key)
         else:
@@ -481,10 +532,10 @@ def simulate_authenticated_user(
             book.record(f"fetch:{module_name}", status, elapsed_ms, error_key)
         if error_key and status in {0, 401, 403}:
             if args.mode == "account":
-                status, elapsed_ms, error_key = account_login(base_url, user, args.build_id, args.request_timeout)
+                status, elapsed_ms, error_key = account_login(base_url, user, args.build_id, build_attestation, args.request_timeout)
                 book.record("relogin", status, elapsed_ms, error_key)
             elif user.access_key:
-                status, elapsed_ms, error_key = access_key_login(base_url, user, args.build_id, args.request_timeout)
+                status, elapsed_ms, error_key = access_key_login(base_url, user, args.build_id, build_attestation, args.request_timeout)
                 book.record("relogin", status, elapsed_ms, error_key)
         sleep_seconds = random.uniform(args.min_wait, args.max_wait)
         if time.time() + sleep_seconds >= stop_at:
@@ -494,6 +545,8 @@ def simulate_authenticated_user(
 
 def main() -> None:
     args = parse_args()
+    build_attestation = load_build_attestation(args)
+    clock_offset = sync_server_clock(args.base_url, args.request_timeout)
     if args.seed_only:
         args.seed_users = True
         if args.mode != "account":
@@ -525,6 +578,7 @@ def main() -> None:
                     "plan_code": args.plan_code,
                     "deterministic_users": bool(args.deterministic_users),
                     "accounts_file": args.output_accounts_file or "",
+                    "server_time_offset_seconds": clock_offset,
                     "sample_accounts": users_to_jsonable(users[:3]),
                 },
                 indent=2,
@@ -541,7 +595,7 @@ def main() -> None:
                 futures.append(executor.submit(simulate_public_user, args.base_url, stop_at, args, book))
         else:
             for user in users:
-                futures.append(executor.submit(simulate_authenticated_user, args.base_url, stop_at, args, book, user, modules))
+                futures.append(executor.submit(simulate_authenticated_user, args.base_url, stop_at, args, book, user, modules, build_attestation))
         for future in concurrent.futures.as_completed(futures):
             future.result()
 
@@ -555,6 +609,7 @@ def main() -> None:
                 "duration_seconds": args.duration_seconds,
                 "interaction_window_seconds": [args.min_wait, args.max_wait],
                 "total_elapsed_seconds": round(elapsed, 2),
+                "server_time_offset_seconds": clock_offset,
                 "results": book.summary(),
             },
             indent=2,
