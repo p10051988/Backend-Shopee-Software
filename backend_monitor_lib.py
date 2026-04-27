@@ -138,6 +138,24 @@ def internal_get(config: MonitorConfig, path: str, params: dict[str, Any] | None
         return _decode_json_response(resp)
 
 
+def internal_post(config: MonitorConfig, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not config.internal_api_secret:
+        raise RuntimeError("INTERNAL_API_SECRET is missing in .env")
+    ts = str(current_timestamp())
+    nonce = new_nonce()
+    payload = json.dumps(body or {}, separators=(",", ":")).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "X-Internal-Key": "autoshopee-internal",
+        "X-Internal-Timestamp": ts,
+        "X-Internal-Nonce": nonce,
+        "X-Internal-Signature": sign_internal_request(config.internal_api_secret, "POST", path, ts, nonce, body or {}),
+    }
+    req = urllib.request.Request(config.base_url + path, data=payload, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=config.timeout_seconds) as resp:
+        return _decode_json_response(resp)
+
+
 def public_get(config: MonitorConfig, path: str) -> dict[str, Any]:
     req = urllib.request.Request(config.base_url + path, method="GET")
     with urllib.request.urlopen(req, timeout=config.timeout_seconds) as resp:

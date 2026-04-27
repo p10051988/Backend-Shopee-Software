@@ -442,6 +442,7 @@ func newApp(cfg Config, db *gorm.DB) *App {
 		r.Get("/runtime/workers", app.handleRuntimeWorkers)
 		r.Get("/runtime/connections", app.handleRuntimeConnections)
 		r.Get("/runtime/traffic", app.handleRuntimeTraffic)
+		r.Post("/runtime/traffic/reset", app.handleRuntimeTrafficReset)
 		r.Post("/runtime/workers/scale", app.handleRuntimeWorkersScale)
 		r.Post("/upload_module", app.handleUploadModule)
 	})

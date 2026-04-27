@@ -9,7 +9,7 @@ import sys
 import time
 from datetime import datetime
 
-from backend_monitor_lib import classify_state, format_duration, load_config, safe_fetch
+from backend_monitor_lib import classify_state, format_duration, internal_post, load_config, safe_fetch
 
 
 RESET = "\033[0m"
@@ -159,9 +159,14 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help="Print once and exit")
     parser.add_argument("--interval", type=int, default=2, help="Refresh interval in seconds")
     parser.add_argument("--json", action="store_true", help="Output raw JSON snapshot once")
+    parser.add_argument("--reset", action="store_true", help="Reset runtime traffic counters and current in-memory sessions, keeping DB data")
     args = parser.parse_args()
 
     config = load_config()
+    if args.reset:
+        payload = internal_post(config, "/api/internal/runtime/traffic/reset", {"reason": "manual-monitor-reset"})
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
     while True:
         snapshot = safe_fetch(config)
         status, reasons = classify_state(snapshot, config)

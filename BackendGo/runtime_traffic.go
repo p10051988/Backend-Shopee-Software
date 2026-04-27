@@ -362,7 +362,7 @@ func (m *RuntimeMonitor) cleanupSessionsLocked(now time.Time) {
 			delete(m.Sessions, sessionID)
 			continue
 		}
-		if !item.LastSeenAt.IsZero() && now.Sub(item.LastSeenAt) > (m.OnlineWindow * 2) {
+		if !item.LastSeenAt.IsZero() && now.Sub(item.LastSeenAt) > (m.OnlineWindow*2) {
 			delete(m.Sessions, sessionID)
 		}
 	}
@@ -543,6 +543,33 @@ func (m *RuntimeMonitor) buildTrafficReport(windowDays int) map[string]any {
 	}
 }
 
+func (m *RuntimeMonitor) resetTraffic() map[string]any {
+	now := time.Now().UTC()
+	m.mu.Lock()
+	m.DayKey = now.Format("2006-01-02")
+	m.TodayBaseline = newTrafficAggregate()
+	m.TodaySession = newTrafficAggregate()
+	m.Handled = 0
+	m.StartTime = now
+	m.Sessions = map[string]*RuntimeSessionInfo{}
+	metricsDir := m.MetricsDir
+	day := m.DayKey
+	m.mu.Unlock()
+
+	if strings.TrimSpace(metricsDir) != "" {
+		_ = os.Remove(filepath.Join(metricsDir, "traffic-"+day+".json"))
+		_ = os.Remove(filepath.Join(metricsDir, "traffic-"+day+".json.tmp"))
+	}
+	return map[string]any{
+		"status":        "reset",
+		"reset_at":      now,
+		"metrics_dir":   metricsDir,
+		"current_day":   day,
+		"retains_db":    true,
+		"retains_users": true,
+	}
+}
+
 func summarizeRoute(route string, stats *TrafficRouteStats) TrafficRouteSummary {
 	if stats == nil {
 		stats = newTrafficRouteStats()
@@ -598,4 +625,8 @@ func (a *App) handleRuntimeTraffic(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, a.runtimeMonitor.buildTrafficReport(windowDays))
+}
+
+func (a *App) handleRuntimeTrafficReset(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.runtimeMonitor.resetTraffic())
 }

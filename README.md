@@ -31,6 +31,12 @@ bash start_backend_vps.sh
 bash monitor_backend_vps.sh
 ```
 
+Reset runtime metrics truoc/sau load test:
+
+```bash
+bash monitor_backend_vps.sh --reset
+```
+
 Panel nay hien thi:
 
 - user online
