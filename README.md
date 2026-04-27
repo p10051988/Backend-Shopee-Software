@@ -35,6 +35,48 @@ bash backend_control_vps.sh
 
 Menu nay gom update tu GitHub, start/restart/stop backend, monitor panel, backup, transfer backup, auto backup cron va logs.
 
+### Menu chi tiet
+
+- `1. Update script/backend tu GitHub`: git pull, bootstrap/build lai backend, restart backend.
+- `2. Start backend`: chay sidecar Python va Go backend nen.
+- `3. Restart backend`: stop backend + sidecar, sau do start lai.
+- `4. Stop backend`: dung backend + sidecar, khong xoa DB.
+- `5. Mo panel backend monitor`: xem user online, session, request, latency, CPU/RAM/swap/disk.
+- `6. Reset runtime metrics/panel`: xoa bo dem runtime, khong xoa user/goi/device/subscription/database.
+- `7. Backup backend + database ngay`: tao file backup trong `backups/`.
+- `8. Tam dung backend de backup, xong tu start lai`: stop backend, backup, roi start lai.
+- `9. Xem danh sach backup`: xem cac file backup da tao.
+- `10. Chuyen backup moi nhat sang VPS khac`: day backup qua VPS khac bang `scp`, `rsync`, hoac `sftp`.
+- `11. Cau hinh auto backup bang cron`: 1 lan/ngay, 2 lan/ngay, 4 lan/ngay, hoac moi N gio.
+- `12. Xoa auto backup`: xoa cron auto backup cua Auto-Shopee.
+- `13. Xem lich auto backup`: xem cron block hien tai.
+- `14. Huong dan restore tren VPS moi`: in lenh restore.
+- `15. Xem logs`: backend log, sidecar log, auto backup log.
+
+### Tai backup ve may Windows
+
+File backup nam tren VPS:
+
+```text
+/root/Backend-Shopee-Software/backups/backend-backup-YYYYMMDD-HHMMSS.tar.gz
+```
+
+Tai ve may Windows:
+
+```powershell
+scp root@142.171.57.85:/root/Backend-Shopee-Software/backups/backend-backup-YYYYMMDD-HHMMSS.tar.gz .
+```
+
+### Lenh nhanh
+
+```bash
+bash backend_control_vps.sh --update
+bash backend_control_vps.sh --restart
+bash backend_control_vps.sh --backup
+bash backend_control_vps.sh --backup-stopped
+bash backend_control_vps.sh --status
+```
+
 ```bash
 bash monitor_backend_vps.sh
 ```
