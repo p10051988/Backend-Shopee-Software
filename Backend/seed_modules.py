@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
-
-import requests
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -574,12 +575,24 @@ def upload(name, code):
         "version": "2.0.0",
         "code_content": code,
     }
+    body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    headers = build_headers(payload)
+    headers["Content-Type"] = "application/json"
     try:
-        response = requests.post(f"{BASE_URL}{PATH}", json=payload, headers=build_headers(payload), timeout=10)
-        if response.status_code == 200:
+        request = urllib.request.Request(
+            f"{BASE_URL}{PATH}",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read().decode("utf-8", errors="replace")
             print(f"Success: {name}")
-        else:
-            print(f"Failed: {name} -> {response.status_code} {response.text}")
+            if raw:
+                print(f"  {raw[:160]}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        print(f"Failed: {name} -> {e.code} {detail}")
     except Exception as e:
         print(f"Error: {name} -> {e}")
 
