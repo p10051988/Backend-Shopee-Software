@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import marshal
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -86,13 +85,14 @@ def compile_module(payload: dict[str, Any]) -> dict[str, Any]:
         f"# SECURE_ID: {uuid4()}\n"
     )
     mutated_source = f"{prelude}{decrypted_source}"
-    code_obj = compile(mutated_source, "<remote_core>", "exec")
-    marshaled_bytes = marshal.dumps(code_obj)
-    encrypted_for_session = Fernet(session_key.encode("utf-8")).encrypt(marshaled_bytes).decode("utf-8")
+    # Encrypt source, not marshaled bytecode. Marshaled code objects are tied to
+    # the Python minor version of the VPS sidecar and crash older desktop builds.
+    encrypted_for_session = Fernet(session_key.encode("utf-8")).encrypt(mutated_source.encode("utf-8")).decode("utf-8")
     return {
         "checksum": checksum,
         "fragment_seal": fragment_seal,
         "encrypted_code": encrypted_for_session,
+        "code_format": "source",
     }
 
 
