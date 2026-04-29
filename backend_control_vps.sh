@@ -176,9 +176,14 @@ backup_now() {
 backup_with_pause() {
   echo "[CONTROL] Pausing backend before backup..."
   stop_backend
-  backup_now
-  echo "[CONTROL] Starting backend after backup..."
-  start_backend
+  local backup_status=0
+  backup_now || backup_status=$?
+  echo "[CONTROL] Starting backend after backup attempt..."
+  start_backend || true
+  if [ "$backup_status" -ne 0 ]; then
+    echo "[CONTROL] Backup failed with status $backup_status. Backend start was attempted."
+    return "$backup_status"
+  fi
 }
 
 latest_backup() {
@@ -213,6 +218,10 @@ transfer_latest_backup() {
 
 install_auto_backup() {
   local runs schedule hours line tmp
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "[CONTROL] crontab not found. Install cronie/crontabs first."
+    return 1
+  fi
   echo "Auto backup frequency:"
   echo "  1. 1 lan/ngay  (03:00)"
   echo "  2. 2 lan/ngay  (03:00, 15:00)"
@@ -241,7 +250,7 @@ install_auto_backup() {
   mkdir -p "$LOG_DIR" "$BACKUP_ROOT"
   line="$schedule cd '$SCRIPT_DIR' && BACKUP_ROOT='$BACKUP_ROOT' bash backup_backend_vps.sh >> '$LOG_DIR/auto_backup.log' 2>&1"
   tmp="$(mktemp)"
-  (crontab -l 2>/dev/null | awk "/$CRON_BEGIN/{skip=1; next} /$CRON_END/{skip=0; next} !skip{print}") > "$tmp"
+  (crontab -l 2>/dev/null || true) | awk "/$CRON_BEGIN/{skip=1; next} /$CRON_END/{skip=0; next} !skip{print}" > "$tmp"
   {
     cat "$tmp"
     echo "$CRON_BEGIN"
@@ -255,14 +264,22 @@ install_auto_backup() {
 
 remove_auto_backup() {
   local tmp
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "[CONTROL] crontab not found."
+    return 1
+  fi
   tmp="$(mktemp)"
-  (crontab -l 2>/dev/null | awk "/$CRON_BEGIN/{skip=1; next} /$CRON_END/{skip=0; next} !skip{print}") > "$tmp"
+  (crontab -l 2>/dev/null || true) | awk "/$CRON_BEGIN/{skip=1; next} /$CRON_END/{skip=0; next} !skip{print}" > "$tmp"
   crontab "$tmp"
   rm -f "$tmp"
   echo "[CONTROL] Auto backup removed."
 }
 
 show_auto_backup() {
+  if ! command -v crontab >/dev/null 2>&1; then
+    echo "[CONTROL] crontab not found."
+    return 1
+  fi
   crontab -l 2>/dev/null | awk "/$CRON_BEGIN/{show=1} show{print} /$CRON_END/{show=0}" || true
 }
 
